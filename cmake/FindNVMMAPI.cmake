@@ -34,7 +34,7 @@
 find_package(PkgConfig)
 
 find_path(NVMMAPI_INCLUDE_DIR nvbuf_utils.h
-          HINTS ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../include)
+          HINTS ${CMAKE_SOURCE_DIR}/include /usr/src/jetson_multimedia_api/include)
 
 find_library(NVMMAPI_LIBRARY NAMES nvbuf_utils
              HINTS /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/tegra)

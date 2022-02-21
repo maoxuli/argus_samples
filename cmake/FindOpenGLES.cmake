@@ -34,7 +34,7 @@
 find_package(PkgConfig)
 
 find_path(OPENGLES_INCLUDE_DIR GLES3/gl3.h
-          HINTS ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../include)
+          HINTS ${CMAKE_SOURCE_DIR}/include /usr/src/jetson_multimedia_api/include)
 
 find_library(OPENGLES_LIBRARY NAMES libGLESv2.so.2)
 

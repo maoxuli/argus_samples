@@ -34,7 +34,7 @@
 find_package(PkgConfig)
 
 find_path(OPENGL_INCLUDE_DIR GL/gl.h
-          HINTS ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../include)
+          HINTS ${CMAKE_SOURCE_DIR}/include /usr/src/jetson_multimedia_api/include)
 
 find_library(OPENGL_LIBRARY NAMES GL)
 

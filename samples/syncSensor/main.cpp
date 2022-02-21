@@ -30,9 +30,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <Argus/Argus.h>
+#include <EGLStream/EGLStream.h>
 #include <cuda.h>
 #include <cudaEGL.h>
 
+#include "ArgusHelpers.h"
 #include "CommonOptions.h"
 #include "CUDAHelper.h"
 #include "EGLGlobal.h"
@@ -45,6 +47,7 @@
 
 
 using namespace Argus;
+using namespace EGLStream;
 
 namespace ArgusSamples
 {
@@ -76,9 +79,13 @@ class StereoDisparityConsumerThread : public Thread
 {
 public:
     explicit StereoDisparityConsumerThread(IEGLOutputStream *leftStream,
-                                           IEGLOutputStream *rightStream)
+                                           IEGLOutputStream *rightStream, 
+                                           IFrameConsumer *leftConsumer,
+                                           IFrameConsumer *rightConsumer)
                                          : m_leftStream(leftStream)
                                          , m_rightStream(rightStream)
+                                         , m_leftConsumer(leftConsumer)
+                                         , m_rightConsumer(rightConsumer)
                                          , m_cudaContext(0)
                                          , m_cuStreamLeft(NULL)
                                          , m_cuStreamRight(NULL)
@@ -98,6 +105,10 @@ private:
 
     IEGLOutputStream *m_leftStream;
     IEGLOutputStream *m_rightStream;
+
+    IFrameConsumer *m_leftConsumer;
+    IFrameConsumer *m_rightConsumer;
+
     CUcontext         m_cudaContext;
     CUeglStreamConnection m_cuStreamLeft;
     CUeglStreamConnection m_cuStreamRight;
@@ -153,24 +164,26 @@ private:
 
 bool StereoDisparityConsumerThread::threadInitialize()
 {
+
+
     // Create CUDA and connect egl streams.
-    PROPAGATE_ERROR(initCUDA(&m_cudaContext));
+    // PROPAGATE_ERROR(initCUDA(&m_cudaContext));
 
-    CONSUMER_PRINT("Connecting CUDA consumer to left stream\n");
-    CUresult cuResult = cuEGLStreamConsumerConnect(&m_cuStreamLeft, m_leftStream->getEGLStream());
-    if (cuResult != CUDA_SUCCESS)
-    {
-        ORIGINATE_ERROR("Unable to connect CUDA to EGLStream as a consumer (CUresult %s)",
-            getCudaErrorString(cuResult));
-    }
+    // CONSUMER_PRINT("Connecting CUDA consumer to left stream\n");
+    // CUresult cuResult = cuEGLStreamConsumerConnect(&m_cuStreamLeft, m_leftStream->getEGLStream());
+    // if (cuResult != CUDA_SUCCESS)
+    // {
+    //     ORIGINATE_ERROR("Unable to connect CUDA to EGLStream as a consumer (CUresult %s)",
+    //         getCudaErrorString(cuResult));
+    // }
 
-    CONSUMER_PRINT("Connecting CUDA consumer to right stream\n");
-    cuResult = cuEGLStreamConsumerConnect(&m_cuStreamRight, m_rightStream->getEGLStream());
-    if (cuResult != CUDA_SUCCESS)
-    {
-        ORIGINATE_ERROR("Unable to connect CUDA to EGLStream as a consumer (CUresult %s)",
-            getCudaErrorString(cuResult));
-    }
+    // CONSUMER_PRINT("Connecting CUDA consumer to right stream\n");
+    // cuResult = cuEGLStreamConsumerConnect(&m_cuStreamRight, m_rightStream->getEGLStream());
+    // if (cuResult != CUDA_SUCCESS)
+    // {
+    //     ORIGINATE_ERROR("Unable to connect CUDA to EGLStream as a consumer (CUresult %s)",
+    //         getCudaErrorString(cuResult));
+    // }
     return true;
 }
 
@@ -183,8 +196,8 @@ bool StereoDisparityConsumerThread::threadExecute()
     m_rightStream->waitUntilConnected();
 
     CONSUMER_PRINT("Streams connected, processing frames.\n");
-    unsigned int histogramLeft[HISTOGRAM_BINS];
-    unsigned int histogramRight[HISTOGRAM_BINS];
+    // unsigned int histogramLeft[HISTOGRAM_BINS];
+    // unsigned int histogramRight[HISTOGRAM_BINS];
     while (true)
     {
         EGLint streamState = EGL_STREAM_STATE_CONNECTING_KHR;
@@ -210,29 +223,176 @@ bool StereoDisparityConsumerThread::threadExecute()
             break;
         }
 
-        ScopedCudaEGLStreamFrameAcquire left(m_cuStreamLeft);
-        ScopedCudaEGLStreamFrameAcquire right(m_cuStreamRight);
-
-        if (!left.hasValidFrame() || !right.hasValidFrame())
+        UniqueObj<Frame> leftFrame(m_leftConsumer->acquireFrame());
+        if (!leftFrame) {
+            CONSUMER_PRINT("acquire left frame failed\n");
             break;
-
-        // Calculate histograms.
-        float time = 0.0f;
-        if (left.generateHistogram(histogramLeft, &time) &&
-            right.generateHistogram(histogramRight, &time))
-        {
-            // Calculate KL distance.
-            float distance = 0.0f;
-            Size2D<uint32_t> size = right.getSize();
-            float dTime = computeKLDistance(histogramRight,
-                                            histogramLeft,
-                                            HISTOGRAM_BINS,
-                                            size.width() * size.height(),
-                                            &distance);
-            CONSUMER_PRINT("KL distance of %6.3f with %5.2f ms computing histograms and "
-                           "%5.2f ms spent computing distance\n",
-                           distance, time, dTime);
         }
+
+        UniqueObj<Frame> rightFrame(m_rightConsumer->acquireFrame());
+        if (!rightFrame) {
+            CONSUMER_PRINT("acquire right frame failed\n");
+            break;
+        }
+
+        // Use the IFrame interface to print out the frame number/timestamp, and
+        // to provide access to the Image in the Frame.
+        IFrame *iFrame = interface_cast<IFrame>(leftFrame);
+        if (!iFrame)
+            ORIGINATE_ERROR("Failed to get left IFrame interface.");
+        CONSUMER_PRINT("Acquired Frame: %llu, time %llu\n",
+                       static_cast<unsigned long long>(iFrame->getNumber()),
+                       static_cast<unsigned long long>(iFrame->getTime()/1000000));
+
+        // Print out some capture metadata from the frame.
+        IArgusCaptureMetadata *iArgusCaptureMetadata = interface_cast<IArgusCaptureMetadata>(leftFrame);
+        if (!iArgusCaptureMetadata)
+            ORIGINATE_ERROR("Failed to get IArgusCaptureMetadata interface.");
+        CaptureMetadata *metadata = iArgusCaptureMetadata->getMetadata();
+        ICaptureMetadata *iMetadata = interface_cast<ICaptureMetadata>(metadata);
+        if (!iMetadata)
+            ORIGINATE_ERROR("Failed to get left ICaptureMetadata interface.");
+        CONSUMER_PRINT("\tSensor Timestamp: %llu, LUX: %f\n",
+                       static_cast<unsigned long long>(iMetadata->getSensorTimestamp()/1000000),
+                       iMetadata->getSceneLux());
+
+        // // Print out image details, and map the buffers to read out some data.
+        // Image *image = iFrame->getImage();
+        // // IImage *iImage = interface_cast<IImage>(image);
+        // // IImage2D *iImage2D = interface_cast<IImage2D>(image);
+        // // for (uint32_t i = 0; i < iImage->getBufferCount(); i++)
+        // // {
+        // //     const uint8_t *d = static_cast<const uint8_t*>(iImage->mapBuffer(i));
+        // //     if (!d)
+        // //         ORIGINATE_ERROR("\tFailed to map buffer\n");
+
+        // //     Size2D<uint32_t> size = iImage2D->getSize(i);
+        // //     CONSUMER_PRINT("\tIImage(2D): "
+        // //                    "buffer %u (%ux%u, %u stride), "
+        // //                    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        // //                    i, size.width(), size.height(), iImage2D->getStride(i),
+        // //                    d[0], d[1], d[2], d[3], d[4], d[5],
+        // //                    d[6], d[7], d[8], d[9], d[10], d[11]);
+        // // }
+
+        // // Write a JPEG to disk.
+        // IImageJPEG *iJPEG = interface_cast<IImageJPEG>(image);
+        // if (iJPEG)
+        // {
+        //     char path[256];
+        //     snprintf(path, sizeof(path), "%llu_0_%llu.JPG",
+        //              static_cast<unsigned long long>(iFrame->getNumber()), 
+        //              static_cast<unsigned long long>(iMetadata->getSensorTimestamp()/1000000));
+        //     Argus::Status status = iJPEG->writeJPEG(path);
+        //     if (status == STATUS_OK)
+        //         CONSUMER_PRINT("\tWrote JPEG: %s\n", path);
+        //     else
+        //         CONSUMER_PRINT("\tFailed to write JPEG: %s (status %d)\n", path, status);
+        // }
+
+        // Use the IFrame interface to print out the frame number/timestamp, and
+        // to provide access to the Image in the Frame.
+        iFrame = interface_cast<IFrame>(rightFrame);
+        if (!iFrame)
+            ORIGINATE_ERROR("Failed to get right IFrame interface.");
+        CONSUMER_PRINT("Acquired Frame: %llu, time %llu\n",
+                       static_cast<unsigned long long>(iFrame->getNumber()),
+                       static_cast<unsigned long long>(iFrame->getTime()/1000000));
+
+        // Print out some capture metadata from the frame.
+        iArgusCaptureMetadata = interface_cast<IArgusCaptureMetadata>(rightFrame);
+        if (!iArgusCaptureMetadata)
+            ORIGINATE_ERROR("Failed to get right IArgusCaptureMetadata interface.");
+        metadata = iArgusCaptureMetadata->getMetadata();
+        iMetadata = interface_cast<ICaptureMetadata>(metadata);
+        if (!iMetadata)
+            ORIGINATE_ERROR("Failed to get right ICaptureMetadata interface.");
+        CONSUMER_PRINT("\tSensor Timestamp: %llu, LUX: %f\n",
+                       static_cast<unsigned long long>(iMetadata->getSensorTimestamp()/1000000),
+                       iMetadata->getSceneLux());
+
+        // // Print out image details, and map the buffers to read out some data.
+        // image = iFrame->getImage();
+        // // IImage *iImage = interface_cast<IImage>(image);
+        // // IImage2D *iImage2D = interface_cast<IImage2D>(image);
+        // // for (uint32_t i = 0; i < iImage->getBufferCount(); i++)
+        // // {
+        // //     const uint8_t *d = static_cast<const uint8_t*>(iImage->mapBuffer(i));
+        // //     if (!d)
+        // //         ORIGINATE_ERROR("\tFailed to map buffer\n");
+
+        // //     Size2D<uint32_t> size = iImage2D->getSize(i);
+        // //     CONSUMER_PRINT("\tIImage(2D): "
+        // //                    "buffer %u (%ux%u, %u stride), "
+        // //                    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        // //                    i, size.width(), size.height(), iImage2D->getStride(i),
+        // //                    d[0], d[1], d[2], d[3], d[4], d[5],
+        // //                    d[6], d[7], d[8], d[9], d[10], d[11]);
+        // // }
+
+        // // Write a JPEG to disk.
+        // iJPEG = interface_cast<IImageJPEG>(image);
+        // if (iJPEG)
+        // {
+        //     char path[256];
+        //     snprintf(path, sizeof(path), "%llu_1_%llu.JPG",
+        //              static_cast<unsigned long long>(iFrame->getNumber()), 
+        //              static_cast<unsigned long long>(iMetadata->getSensorTimestamp()/1000000));
+        //     Argus::Status status = iJPEG->writeJPEG(path);
+        //     if (status == STATUS_OK)
+        //         CONSUMER_PRINT("\tWrote JPEG: %s\n", path);
+        //     else
+        //         CONSUMER_PRINT("\tFailed to write JPEG: %s (status %d)\n", path, status);
+        // }
+
+        sleep(0.05); 
+
+        // EGLint streamState = EGL_STREAM_STATE_CONNECTING_KHR;
+
+        // // Check both the streams and proceed only if they are not in DISCONNECTED state.
+        // if (!eglQueryStreamKHR(
+        //             m_leftStream->getEGLDisplay(),
+        //             m_leftStream->getEGLStream(),
+        //             EGL_STREAM_STATE_KHR,
+        //             &streamState) || (streamState == EGL_STREAM_STATE_DISCONNECTED_KHR))
+        // {
+        //     CONSUMER_PRINT("left : EGL_STREAM_STATE_DISCONNECTED_KHR received\n");
+        //     break;
+        // }
+
+        // if (!eglQueryStreamKHR(
+        //             m_rightStream->getEGLDisplay(),
+        //             m_rightStream->getEGLStream(),
+        //             EGL_STREAM_STATE_KHR,
+        //             &streamState) || (streamState == EGL_STREAM_STATE_DISCONNECTED_KHR))
+        // {
+        //     CONSUMER_PRINT("right : EGL_STREAM_STATE_DISCONNECTED_KHR received\n");
+        //     break;
+        // }
+
+        // ScopedCudaEGLStreamFrameAcquire left(m_cuStreamLeft);
+        // ScopedCudaEGLStreamFrameAcquire right(m_cuStreamRight);
+
+        // if (!left.hasValidFrame() || !right.hasValidFrame())
+        //     break;
+
+        // // Calculate histograms.
+        // float time = 0.0f;
+        // if (left.generateHistogram(histogramLeft, &time) &&
+        //     right.generateHistogram(histogramRight, &time))
+        // {
+        //     // Calculate KL distance.
+        //     float distance = 0.0f;
+        //     Size2D<uint32_t> size = right.getSize();
+        //     float dTime = computeKLDistance(histogramRight,
+        //                                     histogramLeft,
+        //                                     HISTOGRAM_BINS,
+        //                                     size.width() * size.height(),
+        //                                     &distance);
+        //     CONSUMER_PRINT("KL distance of %6.3f with %5.2f ms computing histograms and "
+        //                    "%5.2f ms spent computing distance\n",
+        //                    distance, time, dTime);
+        // }
     }
     CONSUMER_PRINT("No more frames. Cleaning up.\n");
 
@@ -350,6 +510,11 @@ static bool execute(const CommonOptions& options)
     lrCameras.push_back(cameraDevices[0]); // Left Camera (the 1st camera will be used for AC)
     lrCameras.push_back(cameraDevices[1]); // Right Camera
 
+    SensorMode* sensorMode = ArgusHelpers::getSensorMode(cameraDevices[0], 0);
+    ISensorMode *iSensorMode = interface_cast<ISensorMode>(sensorMode);
+    if (!iSensorMode)
+        ORIGINATE_ERROR("Selected sensor mode not available");
+
     // Create the capture session, AutoControl will be based on what the 1st device sees.
     UniqueObj<CaptureSession> captureSession(iCameraProvider->createCaptureSession(lrCameras));
     ICaptureSession *iCaptureSession = interface_cast<ICaptureSession>(captureSession);
@@ -365,8 +530,10 @@ static bool execute(const CommonOptions& options)
     if (!iStreamSettings || !iEGLStreamSettings)
         ORIGINATE_ERROR("Failed to create OutputStreamSettings");
     iEGLStreamSettings->setPixelFormat(PIXEL_FMT_YCbCr_420_888);
-    iEGLStreamSettings->setResolution(STREAM_SIZE);
-    iEGLStreamSettings->setEGLDisplay(g_display.get());
+    iEGLStreamSettings->setResolution(iSensorMode->getResolution());
+    iEGLStreamSettings->setMode(EGL_STREAM_MODE_FIFO);
+    iEGLStreamSettings->setMetadataEnable(true);
+    // iEGLStreamSettings->setEGLDisplay(g_display.get());
 
     // Create egl streams
     PRODUCER_PRINT("Creating left stream.\n");
@@ -383,8 +550,18 @@ static bool execute(const CommonOptions& options)
     if (!iStreamRight)
         ORIGINATE_ERROR("Failed to create right stream");
 
+    UniqueObj<FrameConsumer> consumerLeft(FrameConsumer::create(streamLeft.get()));
+    IFrameConsumer *iConsumerLeft = interface_cast<IFrameConsumer>(consumerLeft);
+    if (!iConsumerLeft)
+        ORIGINATE_ERROR("Failed to create left FrameConsumer");
+
+    UniqueObj<FrameConsumer> consumerRight(FrameConsumer::create(streamRight.get()));
+    IFrameConsumer *iConsumerRight = interface_cast<IFrameConsumer>(consumerRight);
+    if (!iConsumerRight)
+        ORIGINATE_ERROR("Failed to create right FrameConsumer");
+
     PRODUCER_PRINT("Launching disparity checking consumer\n");
-    StereoDisparityConsumerThread disparityConsumer(iStreamLeft, iStreamRight);
+    StereoDisparityConsumerThread disparityConsumer(iStreamLeft, iStreamRight, iConsumerLeft, iConsumerRight);
     PROPAGATE_ERROR(disparityConsumer.initialize());
     PROPAGATE_ERROR(disparityConsumer.waitRunning());
 
@@ -402,7 +579,7 @@ static bool execute(const CommonOptions& options)
     PRODUCER_PRINT("Starting repeat capture requests.\n");
     if (iCaptureSession->repeat(request.get()) != STATUS_OK)
         ORIGINATE_ERROR("Failed to start repeat capture request for preview");
-    sleep(options.captureTime());
+    sleep(60); //options.captureTime());
 
     // Stop the capture requests and wait until they are complete.
     iCaptureSession->stopRepeat();

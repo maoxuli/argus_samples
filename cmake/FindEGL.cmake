@@ -34,7 +34,7 @@
 find_package(PkgConfig)
 
 find_path(EGL_INCLUDE_DIR EGL/egl.h
-          HINTS ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/../include)
+          HINTS ${CMAKE_SOURCE_DIR}/include /usr/src/jetson_multimedia_api/include)
 
 find_library(EGL_LIBRARY NAMES EGL)
 
